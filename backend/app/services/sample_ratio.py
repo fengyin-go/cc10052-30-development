@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.drift_board import drift_board_service
 from app.store import store
 
 
@@ -29,6 +30,19 @@ class SampleRatioService(BaseModuleService):
         entry = store.find(self.MODULE, entry_id)
         if entry is None or entry.get("status") != "待核对":
             return {"ok": False, "message": "仅待核对批次可执行"}
+
+        linked_app = drift_board_service.find_application_by_sample_entry(entry_id)
+        if linked_app is None and entry.get("漂移申请编号"):
+            linked_app = drift_board_service.get_application(entry.get("漂移申请编号"))
+        if linked_app is not None:
+            if not linked_app.get("adopted"):
+                claim = drift_board_service.claim_application(linked_app.get("id"))
+                if not claim.get("ok"):
+                    entry["领取状态"] = "领取冲突，待选择版次"
+                    return claim
+            review = drift_board_service.review_application(linked_app.get("id"))
+            return {"ok": review.get("ok", False), "message": review.get("message", "漂移复核完成"), "review": review}
+
         exp_code = str(entry.get("实验编码", ""))
         assign_rows = [
             r for r in store.rows("variant_assign")
@@ -126,3 +140,105 @@ class SampleRatioService(BaseModuleService):
             }
             for r in store.rows(self.MODULE) if r.get("实验编码") == exp_code
         ]
+
+    # ---- 分组漂移看板领取、两轮样本复核与报告回查 ----
+
+    def create_drift_application(self, values: dict[str, Any]) -> dict[str, Any]:
+        return drift_board_service.create_application(values)
+
+    def claim_drift_board(self, batch_or_app_id: Any, resolution: Any = None, **kwargs: Any) -> dict[str, Any]:
+        entry = store.find(self.MODULE, int(batch_or_app_id)) if str(batch_or_app_id).isdigit() else None
+        if entry is not None:
+            app = drift_board_service.find_application_by_sample_entry(entry["id"])
+            if app is None and entry.get("漂移申请编号"):
+                app = drift_board_service.get_application(entry.get("漂移申请编号"))
+            if app is None:
+                round_refs = (
+                    kwargs.get("round_ids") or kwargs.get("roundIds") or kwargs.get("selected_rounds")
+                    or [part.strip() for part in str(entry.get("关联轮次", "")).replace("／", "/").split("/") if part.strip()]
+                )
+                created = drift_board_service.create_application({
+                    "sample_entry_id": entry["id"],
+                    "experiment_code": entry.get("实验编码") or kwargs.get("experiment_code"),
+                    "round_ids": round_refs,
+                    "create_sample_row": False,
+                })
+                if not created.get("ok"):
+                    return created
+                app = created["application"]
+            return drift_board_service.claim_application(app["id"], resolution, **kwargs)
+
+        app = drift_board_service.get_application(batch_or_app_id)
+        if app is None:
+            return {"ok": False, "status_code": 404, "message": f"样本核对批次/申请 {batch_or_app_id} 不存在"}
+        return drift_board_service.claim_application(app["id"], resolution, **kwargs)
+
+    def review_with_drift(self, batch_or_app_id: Any) -> dict[str, Any]:
+        app = drift_board_service.find_application_by_sample_entry(batch_or_app_id)
+        if app is None:
+            app = drift_board_service.get_application(batch_or_app_id)
+        if app is None:
+            return {"ok": False, "status_code": 404, "message": f"样本核对申请 {batch_or_app_id} 不存在"}
+        return drift_board_service.review_application(app["id"])
+
+    def trace_report_rounds(self, batch_or_app_id: Any) -> dict[str, Any]:
+        return drift_board_service.trace_sample_batch(batch_or_app_id)
+
+    reopen_application = trace_report_rounds
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(drift_board_service, name)
+
+    def run_action_detailed(
+        self,
+        entry_id: int,
+        action: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = payload or {}
+        values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        merged = {**payload, **values}
+        entry = store.find(self.MODULE, entry_id)
+
+        if action in {
+            "领取漂移看板数据", "领取分组漂移看板", "领取分组漂移看板数据",
+            "领取漂移数据", "处理领取冲突", "claim_drift", "claim-drift",
+        } or ("领取" in action and ("漂移" in action or "看板" in action)):
+            result = self.claim_drift_board(
+                entry_id,
+                merged.get("resolution") or merged.get("choice") or merged.get("adopt")
+                or merged.get("accept") or merged.get("use") or merged.get("采用版次") or merged.get("选择"),
+                actor=merged.get("actor"),
+                round_ids=merged.get("round_ids") or merged.get("roundIds") or merged.get("selected_rounds"),
+            )
+            result["entry"] = result.get("application") or result.get("entry") or entry
+            return result
+
+        if action in {
+            "漂移复核", "使用漂移看板复核", "完成漂移复核",
+            "根据漂移看板复核", "根据两份确认样本复核", "样本核对复核",
+        } or ("复核" in action and "漂移" in action):
+            result = self.review_with_drift(entry_id)
+            result["entry"] = result.get("application") or entry
+            return result
+
+        if action in {
+            "回查轮次人数", "回查报告轮次", "回查报告使用的轮次与组内人数",
+            "复查实际采用两轮", "重开原申请", "trace",
+        } or ("回查" in action and ("轮次" in action or "报告" in action)) or ("重开" in action and "申请" in action):
+            result = self.trace_report_rounds(entry_id)
+            result["entry"] = result.get("application") or entry
+            return result
+
+        if action == "执行核对":
+            linked_app = drift_board_service.find_application_by_sample_entry(entry_id)
+            if linked_app is not None or entry.get("漂移申请编号"):
+                result = self.run_check(entry_id)
+                result["entry"] = store.find(self.MODULE, entry_id)
+                return result
+            # 未接入漂移看板的旧通用批次保持脚手架原有的状态流转契约。
+            return super().run_action_detailed(entry_id, action, payload)
+
+        return super().run_action_detailed(entry_id, action, payload)

@@ -16,7 +16,9 @@ class Store:
         }
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        # 专用领域表（轮次、漂移申请等）也放在同一个内存仓库里，但不是第二十个
+        # 通用业务模块；健康检查和运营概览仍只展示种子模块清单。
+        return sorted(SEED_ROWS.keys())
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])

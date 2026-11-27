@@ -71,6 +71,21 @@ class BaseModuleService:
         entry["abnormal"] = action in self.NEGATIVE_ACTIONS
         return entry, f"{self.ENTITY}已{action}"
 
+    def run_action_detailed(
+        self,
+        entry_id: int,
+        action: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run an action and return an API-serializable rich result.
+
+        The generic resource router uses this hook.  Existing modules keep the
+        old ``(entry, message)`` contract via :meth:`run_action`; feature
+        services may override this method to return conflict/board/trace data.
+        """
+        entry, message = self.run_action(entry_id, action)
+        return {"ok": entry is not None, "message": message, "entry": entry}
+
     def domain_snapshot(self) -> dict[str, Any]:
         """输出模块级数据质量快照，供跨模块消费和题位源码锚点使用。"""
         rows = store.rows(self.MODULE)

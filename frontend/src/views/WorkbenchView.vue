@@ -15,6 +15,9 @@
       </div>
     </header>
 
+    <AaDriftPanel v-if="meta.key === 'aa_check'" />
+    <SampleDriftPanel v-else-if="meta.key === 'sample_ratio'" />
+
     <div class="stat-row">
       <article v-for="item in stats" :key="item.label" class="stat-card">
         <span class="stat-label">{{ item.label }}</span>
@@ -88,6 +91,7 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
+      <span v-if="actionMessage" class="success-text" data-testid="action-message">{{ actionMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -104,12 +108,15 @@ import {
   runAction as applyAction,
 } from '@/api/backend-service'
 import type { EntryRow } from '@/data/types'
+import AaDriftPanel from '@/components/AaDriftPanel.vue'
+import SampleDriftPanel from '@/components/SampleDriftPanel.vue'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const actionMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = meta.fields.slice(0, 3)
 const showCreate = ref(false)
@@ -167,9 +174,11 @@ async function submitCreate() {
 
 async function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
+  actionMessage.value = ''
   try {
     const result = await applyAction(meta.key, Number(row.id), action)
     if (!result.ok) throw new Error(result.message)
+    actionMessage.value = result.message
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '操作失败'
